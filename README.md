@@ -168,16 +168,26 @@ graph TD
 ## 2  Detailed Flow Diagram
 
 ```mermaid
-%%  KYC flow – full round-trip (Step Functions, feedback path added ✓)
+%%  KYC flow – full round-trip
+%%  (scrapers expanded; notification split out)
+
 graph TD
     %% ─────────── Sources & Triggers ───────────
     USER_UPLOAD[User uploads<br/>ID + selfie]
     FOLDER[(On-prem images<br/>folder)]
     DATASYNC[AWS DataSync<br/>agent]
     S3[(S3 bucket<br/>kyc-raw)]
-    APIFY[Apify<br/>register scrapers]
     CRON[Weekly<br/>expiry scheduler]
     CSUI[CS Review UI]
+
+    %% ─────────── Register scrapers ───────────
+    subgraph APIFY["Registers / Apify scrapers"]
+        direction TB
+        GDC[Apify GDC scraper]
+        NMC[Apify NMC scraper]
+        GMC[Apify GMC scraper]
+        GPC[Apify GPC scraper]
+    end
 
     %% ─────────── AI services ───────────
     Textract[(Amazon Textract)]
@@ -189,6 +199,7 @@ graph TD
     REQ[reg_request_lambda]
     REG[reg_check_lambda]
     DEC[decision_lambda]
+    NOTIF[notify_lambda]
     REM[expiry_reminder_lambda]
     FEED[review_outcome_capture_lambda]
 
@@ -200,7 +211,7 @@ graph TD
     CSMAIL[Email to CS]
     NOTIFY_SNS[SNS / Webhook]
 
-    %% ─────────── Relational DB (tables) ───────────
+    %% ─────────── Relational DB ───────────
     subgraph DB[Relational DB]
         USERS[(users)]
         IDDOC[(id_documents)]
@@ -238,42 +249,53 @@ graph TD
     FACE --> STEP
 
     STEP --> REQ
-    REQ -- "HTTP type=GDC" --> APIFY
-    APIFY -- JSON --> REG
+    REQ -- "type = GDC" --> GDC
+    REQ -- "type = NMC" --> NMC
+    REQ -- "type = GMC" --> GMC
+    REQ -- "type = GPC" --> GPC
+
+    %% each scraper returns to REG
+    GDC --> REG
+    NMC --> REG
+    GMC --> REG
+    GPC --> REG
+
     REG -- "INSERT reg_checks" --> REGCHK
     REG --> STEP
 
     STEP --> DEC
     DEC -- "INSERT kyc_decisions" --> KYC
     DEC -- "UPDATE users" --> USERS
-    DEC --|PASS|--> NOTIFY_SNS
-    DEC --|MANUAL&nbsp;REVIEW|--> CSMAIL
-    DEC --|WebSocket|--> CSUI
-    DEC --> STEP    
+    DEC --> STEP  
 
-    %% ───── 5  Manual review feedback
+    STEP --> NOTIF
+    NOTIF --> NOTIFY_SNS
+    NOTIFY_SNS --> CSMAIL
+    NOTIFY_SNS --> CSUI
+
+    %% ───── 3  Manual review feedback
     CSUI -- "approve / reject" --> FEED
     FEED -- "INSERT outcome" --> FEEDDB
     FEED -- "UPDATE kyc_decisions" --> KYC
 
-    %% ───── 6  Expiry reminders
+    %% ───── 4  Expiry reminders
     CRON --> REM
     REM -- "expiry <90/30/7d → SNS" --> NOTIFY_SNS
 
     %% ─────────── Styling ───────────
-    classDef lambda fill:#004B76,stroke:#fff,color:#fff;
-    classDef queue  fill:#C0D4E4,stroke:#004B76,color:#000;
-    classDef stepfn fill:#0D5C63,stroke:#fff,color:#fff,font-weight:bold;
-    classDef ai     fill:#7A5FD0,stroke:#fff,color:#fff;
-    classDef source fill:#FFF4CE,stroke:#C09,color:#000;
-    classDef store  fill:#F8F8F8,stroke:#555,color:#000;
+    classDef lambda fill:#004B76,stroke:#fff,color:#fff
+    classDef queue  fill:#C0D4E4,stroke:#004B76,color:#000
+    classDef stepfn fill:#0D5C63,stroke:#fff,color:#fff,font-weight:bold
+    classDef ai     fill:#7A5FD0,stroke:#fff,color:#fff
+    classDef source fill:#FFF4CE,stroke:#C09,color:#000
+    classDef store  fill:#F8F8F8,stroke:#555,color:#000
 
-    class DOC,FACE,REQ,REG,DEC,REM,FEED lambda;
-    class JOBS queue;
-    class Textract,Rekog ai;
-    class USER_UPLOAD,FOLDER,DATASYNC,APIFY,CRON,CSUI,CSMAIL,NOTIFY_SNS source;
-    class USERS,IDDOC,SCANS,SELFIES,FACES,REGCHK,KYC,FEEDDB store;
-    class STEP stepfn;
+    class DOC,FACE,REQ,REG,DEC,NOTIF,REM,FEED lambda
+    class JOBS queue
+    class Textract,Rekog ai
+    class USER_UPLOAD,FOLDER,DATASYNC,CRON,CSUI,CSMAIL,NOTIFY_SNS,GDC,NMC,GMC,GPC source
+    class USERS,IDDOC,SCANS,SELFIES,FACES,REGCHK,KYC,FEEDDB store
+    class STEP stepfn
 ```
 
 ---
