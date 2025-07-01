@@ -168,39 +168,39 @@ graph TD
 ## 2  Detailed Flow Diagram
 
 ```mermaid
-%%  KYC flow – full round-trip AI calls (aligned with id_documents.expiry_date)
+%%  KYC flow – full round-trip (Step Functions, feedback path added ✓)
 graph TD
     %% ─────────── Sources & Triggers ───────────
     USER_UPLOAD[User uploads<br/>ID + selfie]
-    FOLDER[(On-prem images<br/>folder on MS SQL server)]
+    FOLDER[(On-prem images<br/>folder)]
     DATASYNC[AWS DataSync<br/>agent]
-    S3[(S3 bucket<br/>kyc-raw/...)]
-    APIFY[Apify<br/>register scraper]
+    S3[(S3 bucket<br/>kyc-raw)]
+    APIFY[Apify<br/>register scrapers]
     CRON[Weekly<br/>expiry scheduler]
-    CSUI[CS Manual<br/>Review UI]
+    CSUI[CS Review UI]
 
     %% ─────────── AI services ───────────
     Textract[(Amazon Textract)]
     Rekog[(Amazon Rekognition)]
 
-    %% ─────────── Lambda workers ───────────
+    %% ─────────── Lambda workers / StepFn tasks ───────────
     DOC[doc_scan_lambda]
     FACE[face_match_lambda]
-    REG[reg_check_lambda]
     REQ[reg_request_lambda]
+    REG[reg_check_lambda]
     DEC[decision_lambda]
     REM[expiry_reminder_lambda]
+    FEED[review_outcome_capture_lambda]
 
-    %% ─────────── Queues / Topics ───────────
-    Q_FACE[face-match SQS]
-    Q_REQ[reg-request SQS]
-    Q_RESP[reg-check-ingest SQS]
-    Q_DEC[decision SQS]
+    %% ─────────── Queue & Workflow ───────────
+    JOBS[[kyc-jobs SQS<br/>DLQ + alarm]]:::queue
+    STEP["KYC State&nbsp;Machine<br/>(Step Functions)"]:::stepfn
 
+    %% ─────────── Notifications ───────────
     CSMAIL[Email to CS]
-    NOTIFY_SNS[SNS / Webhook<br/>to product]
+    NOTIFY_SNS[SNS / Webhook]
 
-    %% ─────────── RDS (table-level) ───────────
+    %% ─────────── Relational DB (tables) ───────────
     subgraph DB[Relational DB]
         USERS[(users)]
         IDDOC[(id_documents)]
@@ -211,69 +211,69 @@ graph TD
         KYC[(kyc_decisions)]
     end
 
-    %% ───── 0  User upload → local folder → S3
-    USER_UPLOAD -- "Write files" --> FOLDER
+    %% ─────────── Feedback DB ───────────
+    FEEDDB[(Feedback Store<br/>DynamoDB)]:::store
+
+    %% ───── 0  Upload → folder → S3
+    USER_UPLOAD -- "write images" --> FOLDER
     FOLDER -->|DataSync job| DATASYNC
     DATASYNC -->|PUT objects| S3
     S3 -- ObjectCreated --> DOC
 
     %% ───── 1  doc_scan_lambda
+    DOC -. "Textract OCR" .-> Textract
+    Textract -. JSON .-> DOC
     DOC -- "INSERT doc_scans" --> SCANS
     DOC -- "INSERT selfies"   --> SELFIES
-    DOC -- "UPDATE id_documents<br/>(expiry_date, status)" --> IDDOC
-    DOC -- "msg: user_id"              --> Q_FACE
-    DOC -- "msg: reg_type + reg_no"    --> Q_REQ
+    DOC -- "UPDATE id_documents<br/>(status='OCR_DONE')" --> IDDOC
+    DOC -->|msg user_id=12345| JOBS
 
-    %% ───── AI service calls (outbound & return)
-    DOC -. "OCR" .-> Textract
-    Textract -. "JSON result" .-> DOC
+    %% ───── 2  Step Functions orchestration
+    JOBS --> STEP
 
-    FACE -. "Compare & liveness" .-> Rekog
-    Rekog -. "JSON result"       .-> FACE
-
-    %% ───── 2  face_match_lambda
-    Q_FACE --> FACE
+    STEP --> FACE
+    FACE -. "compare + liveness" .-> Rekog
+    Rekog -. JSON .-> FACE
     FACE -- "INSERT face_checks" --> FACES
-    FACE -->|msg: user_id| Q_DEC  
+    FACE --> STEP
 
-    %% ───── 3  Apify request / response
-    Q_REQ --> REQ
-    REQ -- "HTTP request<br/>(reg_type, reg_no, user_id)" --> APIFY
-    APIFY -- "JSON {user_id …}" --> Q_RESP
-
-    %% ───── 3a  reg_check_lambda
-    Q_RESP --> REG
+    STEP --> REQ
+    REQ -- "HTTP type=GDC" --> APIFY
+    APIFY -- JSON --> REG
     REG -- "INSERT reg_checks" --> REGCHK
-    REG -. "msg: user_id" .-> Q_DEC  
+    REG --> STEP
 
-    %% ───── 4  decision_lambda
-    Q_DEC --> DEC
+    STEP --> DEC
     DEC -- "INSERT kyc_decisions" --> KYC
-    DEC -- "UPDATE users"         --> USERS
-    DEC -- PASS           --> NOTIFY_SNS
-    DEC -- MANUAL_REVIEW  --> CSMAIL
+    DEC -- "UPDATE users" --> USERS
+    DEC --|PASS|--> NOTIFY_SNS
+    DEC --|MANUAL&nbsp;REVIEW|--> CSMAIL
+    DEC --|WebSocket|--> CSUI
+    DEC --> STEP    
 
-    %% ───── 5  CS manual review
-    CSUI -- "Approve / Reject" --> KYC
+    %% ───── 5  Manual review feedback
+    CSUI -- "approve / reject" --> FEED
+    FEED -- "INSERT outcome" --> FEEDDB
+    FEED -- "UPDATE kyc_decisions" --> KYC
 
-    %% ───── 6  Expiry reminder
+    %% ───── 6  Expiry reminders
     CRON --> REM
-    REM -- "SELECT id_documents.expiry_date<br/>then send 90/30/7-day emails" --> NOTIFY_SNS
+    REM -- "expiry <90/30/7d → SNS" --> NOTIFY_SNS
 
     %% ─────────── Styling ───────────
-    classDef lambda fill:#004b76,stroke:#fff,color:#fff;
-    class DOC,FACE,REG,REQ,DEC,REM lambda;
+    classDef lambda fill:#004B76,stroke:#fff,color:#fff;
+    classDef queue  fill:#C0D4E4,stroke:#004B76,color:#000;
+    classDef stepfn fill:#0D5C63,stroke:#fff,color:#fff,font-weight:bold;
+    classDef ai     fill:#7A5FD0,stroke:#fff,color:#fff;
+    classDef source fill:#FFF4CE,stroke:#C09,color:#000;
+    classDef store  fill:#F8F8F8,stroke:#555,color:#000;
 
-    classDef queue fill:#c0d4e4,stroke:#004b76,color:#000;
-    class Q_FACE,Q_REQ,Q_RESP,Q_DEC queue;
-
-    classDef source fill:#fff4ce,stroke:#c09,stroke-width:1px,color:#000;
-    class USER_UPLOAD,FOLDER,DATASYNC,APIFY,CRON,CSUI,CSMAIL,NOTIFY_SNS source;
-
-    classDef ai fill:#7a5fd0,stroke:#fff,color:#fff;
+    class DOC,FACE,REQ,REG,DEC,REM,FEED lambda;
+    class JOBS queue;
     class Textract,Rekog ai;
-
-    classDef db fill:#f8f8f8,stroke:#555,color:#000;
+    class USER_UPLOAD,FOLDER,DATASYNC,APIFY,CRON,CSUI,CSMAIL,NOTIFY_SNS source;
+    class USERS,IDDOC,SCANS,SELFIES,FACES,REGCHK,KYC,FEEDDB store;
+    class STEP stepfn;
 ```
 
 ---
