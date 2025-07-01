@@ -357,6 +357,7 @@ erDiagram
     reg_checks {
         BIGSERIAL      id PK
         BIGINT         user_id FK
+        BIGINT         id_document_id FK
         DATE           snapshot_date
         BOOLEAN        matched_name
         BOOLEAN        matched_status
@@ -381,6 +382,7 @@ erDiagram
 
     id_documents ||--o{ doc_scans     : "id_documents.id → doc_scans.id_document_id"
     id_documents ||--o{ face_checks   : "id_documents.id → face_checks.id_document_id"
+    id_documents ||--o{ reg_checks    : "id_documents.id → reg_checks.id_document_id"
 
     selfies      ||--o{ face_checks   : "selfies.id → face_checks.selfie_id"
 ```
