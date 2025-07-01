@@ -29,34 +29,34 @@ End‑to‑end Know‑Your‑Customer (KYC) flow built on **AWS Lambda, SQS, Tex
 ## 1  High‑Level Component Diagram
 
 ```mermaid
-%%  KYC platform – component diagram 
+%%  KYC platform – component diagram
 graph TD
 
     %% ─────────  EXTERNAL ACTORS  ─────────
     subgraph "External Actors"
-        User["User / Browser"]
         CSUI["CS Review UI"]
+        User["User / Browser"]
     end
 
     %% ─────────  AWS KYC PLATFORM  ───────
     subgraph "KYC Platform (AWS account)"
         direction TB
 
-        S3[(S3 Bucket<br/>kyc-raw/…)]:::store
+        S3[(S3 Bucket<br/>kyc-raw/<br/>SSE-KMS + ObjectLock + VPC Endpoint)]:::store
 
-        FaceQ[[face-match SQS]]:::queue
-        RegReqQ[[reg-request SQS]]:::queue
-        RegRespQ[[reg-check-ingest SQS]]:::queue
-        DecQ[[decision SQS]]:::queue
+        KycJobsQ[[kyc-jobs SQS<br/>+ DLQ + Alarm]]:::queue
 
-        DocScan[[doc_scan_lambda]]:::lambda
-        ReqMaker[[reg_request_lambda]]:::lambda
-        FaceMatch[[face_match_lambda]]:::lambda
-        RegCheck[[reg_check_lambda]]:::lambda
-        Decision[[decision_lambda]]:::lambda
-        Expiry[[expiry_reminder_lambda]]:::lambda
+        DocScan[[doc_scan_lambda<br/>+ X-Ray + Logs]]:::lambda
+        ReqMaker[[reg_request_lambda<br/>+ X-Ray + Logs]]:::lambda
+        FaceMatch[[face_match_lambda<br/>+ X-Ray + Logs]]:::lambda
+        RegCheck[[reg_check_lambda<br/>+ X-Ray + Logs]]:::lambda
+        Decision[[decision_lambda<br/>+ X-Ray + Logs]]:::lambda
+        Expiry[[expiry_reminder_lambda<br/>+ X-Ray + Logs]]:::lambda
 
-        DB[(RDS PostgreSQL)]:::store
+        StepFn["KYC State&nbsp;Machine<br/>(Step&nbsp;Functions)"]:::stepfn
+
+        DB[(RDS PostgreSQL<br/>w/ Proxy & Read Replica)]:::store
+        AuditLog[(Audit Trail DB<br/>Structured Logs to OpenSearch)]:::store
     end
 
     %% ─────────  SQL02 ON-PREM / EDGE  ─────────
@@ -67,24 +67,34 @@ graph TD
 
     %% ─────────  REGISTERS / APIFY  ───────
     subgraph APIFY_BOX["Registers / Apify scrapers"]
-        direction LR
+        direction TB
         ApifyGDC["GDC Register Scraper"]
         ApifyNMC["NMC Register Scraper"]
         ApifyGMC["GMC Register Scraper"]
         ApifyGPC["GPC Register Scraper"]
+        RegCache["Register Cache (DynamoDB + TTL)"]:::store
     end
 
     %% ─────────  AWS AI SERVICES  ─────────
     subgraph "AWS AI services"
         direction TB
-        Textract[(Amazon Textract)]:::ai
-        Rekog[(Amazon Rekognition)]:::ai
+        Textract[(Amazon Textract<br/>via VPC Endpoint)]:::ai
+        Rekog[(Amazon Rekognition<br/>via VPC Endpoint)]:::ai
+        Textract -. "layout (no data)" .-> Rekog  
     end
 
     %% ─────────  NOTIFICATION  ───────────
     subgraph "Notifications"
+        direction TB
         NotifySNS["SNS / Webhook"]
         NotifyEmail["Email to CS"]
+        NotifySNS -. "layout (no data)" .-> NotifyEmail
+    end
+
+    %% ─────────  FEEDBACK LOOP  ─────────
+    subgraph "Manual Review Feedback"
+        FeedbackSvc["Review Outcome Capture Lambda"]
+        FeedbackDB["Feedback Store (DynamoDB)"]:::store
     end
 
     %% ─────────  FLOWS ─────────
@@ -93,34 +103,49 @@ graph TD
     DataSyncAgent -->|"PUT objects"| S3
 
     S3 -- "ObjectCreated" --> DocScan
-    DocScan -- "invoke OCR"       --> Textract
-    Textract -- "JSON result"     --> DocScan
-    DocScan -- "rows to DB"       --> DB
-    DocScan -- "msg user_id"      --> FaceQ
-    DocScan -- "msg reg_no/type"  --> RegReqQ
+    DocScan --> Textract
+    Textract --> DocScan
+    DocScan --> DB
+    DocScan --> KycJobsQ
+    KycJobsQ --> StepFn
 
-    FaceQ --> FaceMatch
-    FaceMatch -- "invoke compare/liveness" --> Rekog
-    Rekog -- "JSON result"                 --> FaceMatch
-    FaceMatch -- "row face_checks"         --> DB
-    FaceMatch -- "msg user_id"             --> DecQ
+    StepFn --> FaceMatch
+    FaceMatch --> Rekog
+    Rekog --> FaceMatch
+    FaceMatch --> DB
+    FaceMatch --> StepFn
 
-    RegReqQ --> ReqMaker
-    ReqMaker -- "HTTP POST"      --> APIFY_BOX
-    APIFY_BOX -- "JSON response" --> RegRespQ
+    StepFn --> ReqMaker
+    ReqMaker -- "type = GDC" --> ApifyGDC
+    ReqMaker -- "type = NMC" --> ApifyNMC
+    ReqMaker -- "type = GMC" --> ApifyGMC
+    ReqMaker -- "type = GPC" --> ApifyGPC
 
-    RegRespQ --> RegCheck
-    RegCheck -- "row reg_checks" --> DB
-    RegCheck -- "msg user_id"    --> DecQ
+    %% each scraper writes downward into the cache
+    ApifyGDC --> RegCache
+    ApifyNMC --> RegCache
+    ApifyGMC --> RegCache
+    ApifyGPC --> RegCache
+    RegCache --> ReqMaker
+    ReqMaker --> StepFn
 
-    DecQ --> Decision
-    Decision -- "insert kyc_decisions⏎update users" --> DB
-    Decision -- "PASS"          --> NotifySNS
-    Decision -- "MANUAL_REVIEW" --> NotifyEmail
+    StepFn --> RegCheck
+    RegCheck --> DB
+    RegCheck --> StepFn
 
-    Expiry -- "select expiring IDs" --> DB
-    Expiry -- "90/30/7-day emails"  --> NotifyEmail
-    Expiry -- "force re-upload"     --> User
+    StepFn --> Decision
+    Decision --> DB
+    Decision --> NotifySNS
+    Decision --> NotifyEmail
+    Decision --> CSUI
+    Decision --> AuditLog
+
+    CSUI --> FeedbackSvc
+    FeedbackSvc --> FeedbackDB
+
+    Expiry --> DB
+    Expiry --> NotifyEmail
+    Expiry --> User
 
     %% ─────────  STYLING  ─────────
     classDef lambda fill:#004B76,stroke:#fff,color:#fff;
@@ -128,12 +153,14 @@ graph TD
     classDef store  fill:#F8F8F8,stroke:#555,color:#000;
     classDef source fill:#FFF4CE,stroke:#C09,color:#000;
     classDef ai     fill:#7A5FD0,stroke:#fff,color:#fff;
+    classDef stepfn fill:#0D5C63,stroke:#fff,color:#fff,font-weight:bold;
 
-    class OnPremSvc,DocScan,ReqMaker,FaceMatch,RegCheck,Decision,Expiry lambda;
-    class FaceQ,RegReqQ,RegRespQ,DecQ queue;
-    class S3,DB store;
+    class OnPremSvc,DocScan,ReqMaker,FaceMatch,RegCheck,Decision,Expiry,FeedbackSvc lambda;
+    class KycJobsQ queue;
+    class S3,DB,AuditLog,FeedbackDB,RegCache store;
     class DataSyncAgent source;
     class Textract,Rekog ai;
+    class StepFn stepfn;
 ```
 
 ---
