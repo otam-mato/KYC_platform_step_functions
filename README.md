@@ -299,7 +299,7 @@ graph TD
 ```
 ---
 
-## 3  Desicion logic
+## 3  Decision logic
 
 ```mermaid
 flowchart TD
