@@ -297,6 +297,71 @@ graph TD
     class USERS,IDDOC,SCANS,SELFIES,FACES,REGCHK,KYC,FEEDDB store
     class STEP stepfn
 ```
+---
+
+## 3  Desicion logic
+
+```mermaid
+flowchart TD
+    %% ───────── Decision logic ─────────
+    A([Start<br/>SFN payload]) --> B{Face checks}
+    B -- not ok / score&lt;90 / livenessFail --> R1["reasons += FACE_*"]
+    R1 --> Z{{More checks?}}
+    B -- pass --> C{Register checks}
+
+    C -- name mismatch --> R2["reasons += REG_NAME_MISMATCH"]
+    R2 --> Z
+    C -- status inactive --> R3["reasons += REG_STATUS_FAIL"]
+    R3 --> Z
+    C -- pass --> D{Passport expired?}
+
+    D -- yes --> R4["reasons += ID_EXPIRED"]
+    R4 --> Z
+
+    D -- no --> E{Upstream status != ok?}
+    E -- yes --> R5["reasons += UPSTREAM_ERROR"]
+    R5 --> Z
+    E -- no --> P([decision = PASS])
+
+    Z{{Any reasons?}}
+    Z -- yes --> F([decision = FAIL])
+    Z -- no  --> G([decision = MANUAL_REVIEW])
+
+    %% ──────── DB writes (single tx) ────────
+    subgraph DB_Transaction[DB transaction]
+      direction TB
+      style DB_Transaction fill:#f8f9fa,stroke:#999
+
+      %% PASS path
+      P  --> IPASS["INSERT kyc_decisions<br/>(user_id, PASS, ())"]
+      IPASS --> UP1["UPDATE users<br/>status = VERIFIED"]
+      UP1   --> UP2["UPDATE id_documents<br/>status = VERIFIED"]
+
+      %% FAIL path
+      F  --> IFAIL["INSERT kyc_decisions<br/>(user_id, FAIL, reasons)"]
+      IFAIL --> UF1["UPDATE users<br/>status = REJECTED"]
+      UF1   --> UF2["UPDATE id_documents<br/>status = REJECTED"]
+
+      %% MANUAL REVIEW path
+      G  --> IMR["INSERT kyc_decisions<br/>(user_id, MANUAL_REVIEW, ())"]
+      IMR --> UM1["UPDATE users<br/>status = REVIEW"]
+      UM1 --> UM2["UPDATE id_documents<br/>status = REJECTED"]
+    end
+
+    %% ───────── Styling ─────────
+    classDef pass   fill:#d4f7dc,stroke:#2d8a34,color:#1c5b26;
+    classDef fail   fill:#ffd7d7,stroke:#c62828,color:#7e0f0f;
+    classDef review fill:#fff2cc,stroke:#c7a600,color:#6d5800;
+    classDef process fill:#e8e8e8,stroke:#555,color:#000;
+    classDef dbop   fill:#cce5ff,stroke:#0059b3,color:#003366;
+
+    class P pass;
+    class F fail;
+    class G review;
+    class A,B,C,D,E,R1,R2,R3,R4,R5,Z process;
+    class IPASS,IFAIL,IMR,UP1,UP2,UF1,UF2,UM1,UM2 dbop;
+
+```
 
 ---
 
