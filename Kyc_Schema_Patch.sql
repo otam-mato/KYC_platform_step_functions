@@ -1,4 +1,4 @@
--- ░░░ KYC Platform – Initial Schema  (v2) ░░░
+-- ░░░ KYC Platform – Initial Schema  (v3) ░░░
 -- Author: me  |  Creates all tables, enums, PK/FK relations and indexes
 -- Compatible with PostgreSQL ≥ 12.  Run in an empty database or inside a transaction.
 
@@ -75,14 +75,15 @@ CREATE TABLE face_checks (
 
 -- Register (Apify) lookup results
 CREATE TABLE reg_checks (
-  id               BIGSERIAL PRIMARY KEY,
-  user_id          BIGINT REFERENCES users(id)        ON DELETE CASCADE,
-  id_document_id   BIGINT REFERENCES id_documents(id) ON DELETE CASCADE,
-  snapshot_date    DATE,
-  matched_name     BOOLEAN,
-  matched_status   BOOLEAN,
+  id                BIGSERIAL PRIMARY KEY,
+  user_id           BIGINT REFERENCES users(id)        ON DELETE CASCADE,
+  id_document_id    BIGINT REFERENCES id_documents(id) ON DELETE CASCADE,
+  snapshot_date     DATE,
+  matched_name      BOOLEAN,
+  matched_status    BOOLEAN,
   raw_response_json JSONB,
-  checked_at       TIMESTAMPTZ DEFAULT NOW() NOT NULL
+  run_id            VARCHAR(100) UNIQUE,
+  checked_at        TIMESTAMPTZ DEFAULT NOW() NOT NULL
 );
 
 -- Final KYC verdicts (history allowed: many decisions per user)
