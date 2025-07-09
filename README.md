@@ -476,7 +476,7 @@ erDiagram
 
 ---
 
-### Running Locally
+### Create Schema:
 
 ```bash
 psql $DB_URL -f "Kyc_Schema_Patch.sql"
@@ -484,6 +484,3 @@ psql $DB_URL -f "Kyc_Schema_Patch.sql"
 
 ---
 
-### Contributing
-
-PRs welcome – please update diagrams + docs if queue names, enum values, or DB tables change.
